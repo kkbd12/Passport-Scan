@@ -1,14 +1,9 @@
 import express from "express";
 import path from "path";
-import { fileURLToPath } from "url";
-import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
@@ -79,6 +74,11 @@ async function startServer() {
 Carefully examine the passport/ID document in the provided image and extract all details accurately.
 The passport could be from Bangladesh (MRP or E-Passport), United States, United Kingdom, Canada, India, Pakistan, UAE, Saudi Arabia, European Union, or any other nation.
 
+CRITICAL ORIENTATION & FORMAT HANDLING:
+- The passport in the image might be ROTATED 90 degrees (sideways/vertical), 180 degrees (upside down), or 270 degrees.
+- The image might contain a two-page passport booklet spread (e.g., bio page on the left or right, and emergency/endorsement page on the other side).
+- You MUST automatically detect the correct reading angle of the bio-data page and read all text and Machine Readable Zone (MRZ) correctly, regardless of image rotation or tilt.
+
 Analyze both:
 1. The Visual Inspection Zone (VIZ) with printed labels:
    - Full Name / নাম / Nom et Prénoms / Given Names & Surname
@@ -88,11 +88,11 @@ Analyze both:
    - Sex / লিঙ্গ
    - Date of Issue / প্রদানের তারিখ / Date of Issue (Issue Date)
    - Date of Expiry / মেয়াদোত্তীর্ণের তারিখ / Expiry Date
-2. The Machine Readable Zone (MRZ) at the bottom (2 lines of 44 characters starting with P< or P, or 3 lines of 30 characters).
+2. The Machine Readable Zone (MRZ) (2 lines of 44 characters starting with P< or P, or 3 lines of 30 characters).
 
 Rules:
-- passportNo: Extract the document number exactly as printed or encoded in MRZ (e.g., EA0123456, C12345678, 550982341, A1234567, etc.). Do not include spaces.
-- fullName: Direct complete Full Name of the holder in uppercase (e.g. "MOHAMMAD TARIQ RAHMAN", "JOHN PAUL STEVENS", "EMMA CLAIRE HARRISON"). Do not split into surname and given names, provide the unified direct full name.
+- passportNo: Extract the document number exactly as printed or encoded in MRZ (e.g., EA0123456, A12302331, C12345678, 550982341, A1234567, etc.). Do not include spaces.
+- fullName: Direct complete Full Name of the holder in uppercase (e.g. "MOHAMMAD TARIQ RAHMAN", "JOHN PAUL STEVENS", "MD MAMUNUR RASHID"). Do not split into surname and given names, provide the unified direct full name.
 - nationality: 3-letter ICAO country code (e.g., BGD, USA, GBR, CAN, IND, PAK, AUS, SAU, ARE, DEU).
 - dob: Date of Birth formatted as YYYY-MM-DD.
 - sex: "Male" or "Female" or "Unspecified".
@@ -120,28 +120,50 @@ Return STRICTLY valid JSON matching:
   "confidence": 98
 }`;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.6-flash",
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: effectiveMime,
-                data: cleanBase64,
-              },
-            },
-            {
-              text: prompt,
-            },
-          ],
-        },
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.1,
-        },
-      });
+      const candidateModels = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
+      let lastErr: any = null;
+      let responseText = "";
+      let usedModel = "gemini-3.8-flash";
 
-      const responseText = response.text?.trim() || "{}";
+      for (const modelName of candidateModels) {
+        try {
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: {
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: effectiveMime,
+                    data: cleanBase64,
+                  },
+                },
+                {
+                  text: prompt,
+                },
+              ],
+            },
+            config: {
+              responseMimeType: "application/json",
+              temperature: 0.1,
+            },
+          });
+
+          responseText = response.text?.trim() || "{}";
+          if (responseText && responseText !== "{}") {
+            usedModel = modelName;
+            lastErr = null;
+            break;
+          }
+        } catch (modelErr: any) {
+          console.warn(`Model ${modelName} failed, trying next fallback:`, modelErr?.message || modelErr);
+          lastErr = modelErr;
+        }
+      }
+
+      if (lastErr && !responseText) {
+        throw lastErr;
+      }
+
       let parsedData;
       try {
         parsedData = JSON.parse(responseText);
@@ -153,20 +175,21 @@ Return STRICTLY valid JSON matching:
       return res.json({
         success: true,
         data: parsedData,
-        engine: "gemini-3.8-flash"
+        engine: usedModel
       });
 
     } catch (err: any) {
       console.error("Passport AI scanning error:", err);
       return res.status(500).json({ 
         error: err.message || "Failed to process passport image with AI",
-        engine: "gemini-3.8-flash"
+        engine: "gemini-fallback"
       });
     }
   });
 
   // Vite middleware in dev or static files in production
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",

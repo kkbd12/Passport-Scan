@@ -16,7 +16,9 @@ import {
   Plus,
   Zap,
   HelpCircle,
-  Eye
+  Eye,
+  RotateCw,
+  RotateCcw
 } from 'lucide-react';
 import { PassportRecord, ScanStatus } from './types';
 import { parsePassportData } from './utils/mrzParser';
@@ -87,6 +89,15 @@ export default function App() {
 
   // Convert File / Blob / Data URL to base64
   const getBase64FromSource = async (url: string, file: File | null): Promise<{ base64: string; mimeType: string }> => {
+    // If the image was rotated or came from camera as a base64 data URL
+    if (url.startsWith('data:')) {
+      const match = url.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        return { mimeType: match[1], base64: match[2] };
+      }
+      return { base64: url, mimeType: 'image/jpeg' };
+    }
+
     if (file) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -115,6 +126,54 @@ export default function App() {
       reader.onerror = reject;
       reader.readAsDataURL(blob);
     });
+  };
+
+  // Rotate preview image 90 degrees clockwise or counter-clockwise
+  const handleRotateImage = async (degrees: number) => {
+    if (!previewUrl) return;
+    try {
+      setStatus(prev => ({
+        ...prev,
+        message: degrees > 0 ? 'ছবিটি ঘড়ির কাঁটার দিকে ঘোরানো হচ্ছে...' : 'ছবিটি উল্টোদিকে ঘোরানো হচ্ছে...',
+      }));
+
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.src = previewUrl;
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+      });
+
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      if (Math.abs(degrees) === 90 || Math.abs(degrees) === 270) {
+        canvas.width = img.height;
+        canvas.height = img.width;
+      } else {
+        canvas.width = img.width;
+        canvas.height = img.height;
+      }
+
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate((degrees * Math.PI) / 180);
+      ctx.drawImage(img, -img.width / 2, -img.height / 2);
+
+      const rotatedDataUrl = canvas.toDataURL('image/jpeg', 0.95);
+      setPreviewUrl(rotatedDataUrl);
+      setSelectedFile(null); // use rotated data URL as active image source
+      setStatus({
+        state: 'idle',
+        message: 'ছবি ঘোরানো হয়েছে। এখন "Scan Passport" বোতামে ক্লিক করুন।',
+        progress: 0,
+      });
+      showToast(degrees > 0 ? 'ছবি ডানদিকে ৯০° ঘোরানো হয়েছে' : 'ছবি বামদিকে ৯০° ঘোরানো হয়েছে', 'info');
+    } catch (err) {
+      console.error('Rotation error:', err);
+      showToast('ছবি ঘোরানো ব্যর্থ হয়েছে', 'error');
+    }
   };
 
   // Image file handler
@@ -589,17 +648,40 @@ export default function App() {
                   className="max-h-44 rounded-lg shadow-xs object-contain mb-2.5 border border-slate-200 bg-white"
                   alt="Passport Preview"
                 />
-                <button
-                  onClick={() => {
-                    setSelectedFile(null);
-                    setPreviewUrl(null);
-                    setStatus({ state: 'idle', message: 'Select or upload a passport image to begin.', progress: 0 });
-                    if (fileInputRef.current) fileInputRef.current.value = '';
-                  }}
-                  className="text-xs text-rose-600 hover:text-rose-700 font-medium mb-1 cursor-pointer"
-                >
-                  Remove image
-                </button>
+                <div className="flex flex-wrap items-center justify-center gap-1.5 mb-2">
+                  <button
+                    type="button"
+                    onClick={() => handleRotateImage(-90)}
+                    disabled={status.state === 'loading' || status.state === 'scanning'}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 disabled:opacity-50 px-2.5 py-1 rounded-md shadow-2xs transition cursor-pointer"
+                    title="Rotate 90° Left (Counter-Clockwise)"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 text-slate-600" />
+                    <span>Rotate Left</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRotateImage(90)}
+                    disabled={status.state === 'loading' || status.state === 'scanning'}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 disabled:opacity-50 px-2.5 py-1 rounded-md shadow-2xs transition cursor-pointer"
+                    title="Rotate 90° Right (Clockwise)"
+                  >
+                    <RotateCw className="w-3.5 h-3.5 text-slate-600" />
+                    <span>Rotate Right</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedFile(null);
+                      setPreviewUrl(null);
+                      setStatus({ state: 'idle', message: 'Select or upload a passport image to begin.', progress: 0 });
+                      if (fileInputRef.current) fileInputRef.current.value = '';
+                    }}
+                    className="text-xs text-rose-600 hover:text-rose-700 font-medium px-2 py-1 cursor-pointer hover:underline"
+                  >
+                    Remove
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="flex flex-col items-center text-slate-400 py-6 text-center">
