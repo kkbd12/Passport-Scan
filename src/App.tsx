@@ -16,9 +16,7 @@ import {
   Plus,
   Zap,
   HelpCircle,
-  Eye,
-  RotateCw,
-  RotateCcw
+  Eye
 } from 'lucide-react';
 import { PassportRecord, ScanStatus } from './types';
 import { parsePassportData, cleanMrzLine1Name, estimateIssueDate } from './utils/mrzParser';
@@ -26,6 +24,7 @@ import { exportRecordsToExcel, exportRecordsToCSV } from './utils/excelExporter'
 import { preprocessForOCR } from './utils/imagePreprocessing';
 import { CameraModal } from './components/CameraModal';
 import { EditRecordModal } from './components/EditRecordModal';
+import { ConfidenceIndicator } from './components/ConfidenceIndicator';
 
 const STORAGE_KEY = 'passport_scanner_records_v1';
 
@@ -191,54 +190,6 @@ export default function App() {
 
       img.src = url;
     });
-  };
-
-  // Rotate preview image 90 degrees clockwise or counter-clockwise
-  const handleRotateImage = async (degrees: number) => {
-    if (!previewUrl) return;
-    try {
-      setStatus(prev => ({
-        ...prev,
-        message: degrees > 0 ? 'ছবিটি ঘড়ির কাঁটার দিকে ঘোরানো হচ্ছে...' : 'ছবিটি উল্টোদিকে ঘোরানো হচ্ছে...',
-      }));
-
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.src = previewUrl;
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = reject;
-      });
-
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      if (Math.abs(degrees) === 90 || Math.abs(degrees) === 270) {
-        canvas.width = img.height;
-        canvas.height = img.width;
-      } else {
-        canvas.width = img.width;
-        canvas.height = img.height;
-      }
-
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.rotate((degrees * Math.PI) / 180);
-      ctx.drawImage(img, -img.width / 2, -img.height / 2);
-
-      const rotatedDataUrl = canvas.toDataURL('image/jpeg', 0.95);
-      setPreviewUrl(rotatedDataUrl);
-      setSelectedFile(null); // use rotated data URL as active image source
-      setStatus({
-        state: 'idle',
-        message: 'ছবি ঘোরানো হয়েছে। এখন "Scan Passport" বোতামে ক্লিক করুন।',
-        progress: 0,
-      });
-      showToast(degrees > 0 ? 'ছবি ডানদিকে ৯০° ঘোরানো হয়েছে' : 'ছবি বামদিকে ৯০° ঘোরানো হয়েছে', 'info');
-    } catch (err) {
-      console.error('Rotation error:', err);
-      showToast('ছবি ঘোরানো ব্যর্থ হয়েছে', 'error');
-    }
   };
 
   // Image file handler
@@ -742,27 +693,7 @@ export default function App() {
                   className="max-h-44 rounded-lg shadow-xs object-contain mb-2.5 border border-slate-200 bg-white"
                   alt="Passport Preview"
                 />
-                <div className="flex flex-wrap items-center justify-center gap-1.5 mb-2">
-                  <button
-                    type="button"
-                    onClick={() => handleRotateImage(-90)}
-                    disabled={status.state === 'loading' || status.state === 'scanning'}
-                    className="inline-flex items-center gap-1 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 disabled:opacity-50 px-2.5 py-1 rounded-md shadow-2xs transition cursor-pointer"
-                    title="Rotate 90° Left (Counter-Clockwise)"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5 text-slate-600" />
-                    <span>Rotate Left</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleRotateImage(90)}
-                    disabled={status.state === 'loading' || status.state === 'scanning'}
-                    className="inline-flex items-center gap-1 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 disabled:opacity-50 px-2.5 py-1 rounded-md shadow-2xs transition cursor-pointer"
-                    title="Rotate 90° Right (Clockwise)"
-                  >
-                    <RotateCw className="w-3.5 h-3.5 text-slate-600" />
-                    <span>Rotate Right</span>
-                  </button>
+                <div className="flex items-center justify-center mb-2">
                   <button
                     type="button"
                     onClick={() => {
@@ -771,9 +702,9 @@ export default function App() {
                       setStatus({ state: 'idle', message: 'Select or upload a passport image to begin.', progress: 0 });
                       if (fileInputRef.current) fileInputRef.current.value = '';
                     }}
-                    className="text-xs text-rose-600 hover:text-rose-700 font-medium px-2 py-1 cursor-pointer hover:underline"
+                    className="text-xs text-rose-600 hover:text-rose-700 font-medium px-2.5 py-1 rounded-md bg-rose-50 border border-rose-200 hover:bg-rose-100 transition cursor-pointer"
                   >
-                    Remove
+                    Remove Image
                   </button>
                 </div>
               </div>
@@ -866,13 +797,14 @@ export default function App() {
                   <th className="p-3">Sex</th>
                   <th className="p-3">Issue Date</th>
                   <th className="p-3">Expiry Date</th>
+                  <th className="p-3">Confidence</th>
                   <th className="p-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody id="tableBody" className="divide-y divide-slate-100 text-slate-600 bg-white">
                 {records.length === 0 ? (
                   <tr id="emptyRow">
-                    <td colSpan={9} className="p-8 text-center text-slate-400">
+                    <td colSpan={10} className="p-8 text-center text-slate-400">
                       <div className="flex flex-col items-center justify-center gap-2">
                         <FileSpreadsheet className="w-9 h-9 text-slate-300 stroke-1" />
                         <p className="font-medium text-slate-600 text-base">No scanned passport records yet.</p>
@@ -913,6 +845,9 @@ export default function App() {
                       </td>
                       <td className="p-3 font-mono text-xs text-slate-600">{r.issueDate || '—'}</td>
                       <td className="p-3 font-mono text-xs text-slate-600">{r.expiry}</td>
+                      <td className="p-3">
+                        <ConfidenceIndicator confidence={r.confidence} />
+                      </td>
                       <td className="p-3 text-right">
                         <div className="flex items-center justify-end gap-1">
                           <button

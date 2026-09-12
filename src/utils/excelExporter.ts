@@ -15,6 +15,7 @@ export function exportRecordsToExcel(records: PassportRecord[], filename?: strin
     "Sex": r.sex,
     "Issue Date": r.issueDate || "",
     "Expiry Date": r.expiry,
+    "Confidence": `${r.confidence || 90}%`,
     "MRZ Verified": r.mrzDetected ? "Yes" : "No",
     "Scan Date": r.scannedAt
   }));
@@ -31,6 +32,7 @@ export function exportRecordsToExcel(records: PassportRecord[], filename?: strin
     { wch: 10 }, // Sex
     { wch: 15 }, // Issue Date
     { wch: 15 }, // Expiry Date
+    { wch: 12 }, // Confidence
     { wch: 14 }, // MRZ Verified
     { wch: 20 }, // Scan Date
   ];
@@ -56,6 +58,7 @@ export function exportRecordsToCSV(records: PassportRecord[], filename?: string)
     "Sex": r.sex,
     "Issue Date": r.issueDate || "",
     "Expiry Date": r.expiry,
+    "Confidence": `${r.confidence || 90}%`,
     "MRZ Verified": r.mrzDetected ? "Yes" : "No",
     "Scan Date": r.scannedAt
   }));
