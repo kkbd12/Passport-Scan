@@ -1,0 +1,6 @@
+{
+  "name": "Passport Scanner & Excel Exporter",
+  "description": "Upload or scan passport images to extract personal details via OCR and MRZ parsing, and export records directly to Excel spreadsheets.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
