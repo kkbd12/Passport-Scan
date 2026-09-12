@@ -84,6 +84,112 @@ export function formatMRZDate(dateStr: string, isExpiry = false): string {
   return `${year}-${mm}-${dd}`;
 }
 
+/**
+ * Estimate passport Issue Date from Expiry Date if not visible in MRZ
+ * (Standard passports are valid for 10 or 5 years)
+ */
+export function estimateIssueDate(expiryDateStr: string): string {
+  if (!expiryDateStr || expiryDateStr === "N/A" || !/^\d{4}-\d{2}-\d{2}$/.test(expiryDateStr)) {
+    return "";
+  }
+  const parts = expiryDateStr.split("-");
+  const expYear = parseInt(parts[0], 10);
+  const month = parseInt(parts[1], 10);
+  const day = parseInt(parts[2], 10);
+
+  const currentYear = new Date().getFullYear();
+  const validityYears = (expYear - currentYear > 4) ? 10 : 5;
+
+  const expDateObj = new Date(expYear, month - 1, day);
+  expDateObj.setFullYear(expDateObj.getFullYear() - validityYears);
+  expDateObj.setDate(expDateObj.getDate() + 1);
+
+  const y = expDateObj.getFullYear();
+  const m = String(expDateObj.getMonth() + 1).padStart(2, "0");
+  const d = String(expDateObj.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * Clean MRZ Line 1 Name Field:
+ * Eliminates OCR confusion where filler '<' was read as 'K', 'L', 'C', '(', etc.
+ * Cleans trailing noise like 'KLKLCLCLLLLLLLLLLLLKLKLK'
+ */
+export function cleanMrzLine1Name(line1: string, country = "BGD"): { surname: string; givenNames: string; fullName: string } {
+  let s = line1.trim();
+  if (s.startsWith("P<") || s.startsWith("P")) {
+    s = s.substring(s.startsWith("P<") ? 5 : (s.startsWith("P") && s.length > 5 ? 5 : 0));
+  }
+
+  // 1. Remove trailing filler noise: runs of '<', 'K', 'L', 'C', etc.
+  s = s.replace(/<[<KLC\s]*$/g, "");
+  s = s.replace(/\s+[KLC]{3,}$/i, "");
+  s = s.replace(/[KLC]{5,}$/i, "");
+  s = s.trim();
+
+  let surname = "";
+  let givenNames = "";
+
+  // 2. Identify separator between surname and given names
+  // Standard MRZ: '<<'
+  // Common OCR misreads: KK, KL, LK, LL, <K, K<, <L, L<, or spaced versions
+  const doubleDelimiter = /(?:<<|<K|K<|<L|L<|KK|KL|LK|LL)/i;
+
+  if (doubleDelimiter.test(s)) {
+    const parts = s.split(doubleDelimiter);
+    surname = parts[0];
+    givenNames = parts.slice(1).join(" ");
+  } else if (/(\s*[<KLC]{1,2}\s+[<KLC]{1,2}\s*|\s+[<KLC]{2}\s+)/.test(s)) {
+    const match = s.match(/^(.*?)(?:\s*[<KLC]{1,2}\s+[<KLC]{1,2}\s*|\s+[<KLC]{2}\s+)(.*)$/);
+    if (match) {
+      surname = match[1];
+      givenNames = match[2];
+    }
+  } else if (s.includes("<")) {
+    const parts = s.split("<");
+    surname = parts[0];
+    givenNames = parts.slice(1).join(" ");
+  } else {
+    // Check if MD or MOHAMMAD is inside
+    const mdMatch = s.match(/^(.*?)(?:[KLC]{1,2})?(MD|MOHAMMAD)(.*)$/i);
+    if (mdMatch) {
+      surname = mdMatch[1];
+      givenNames = `${mdMatch[2]} ${mdMatch[3]}`;
+    } else {
+      surname = s;
+    }
+  }
+
+  // Inside givenNames, single < or K/L between words
+  givenNames = givenNames.replace(/[<]/g, " ");
+  givenNames = givenNames.replace(/(MD)(MAHAFIZUR)/i, "$1 $2");
+  givenNames = givenNames.replace(/(MOHAMMAD)([A-Z]+)/i, "$1 $2");
+
+  // Clean characters inside surname and givenNames
+  surname = surname.replace(/[^A-Za-z\s]/g, " ").replace(/\s+/g, " ").trim();
+  givenNames = givenNames.replace(/[^A-Za-z\s]/g, " ").replace(/\s+/g, " ").trim();
+
+  // If givenNames starts or ends with stray single K or L (e.g. "K MD" or "KMD")
+  givenNames = givenNames.replace(/^[KLC]\s+(MD\b|MOHAMMAD\b)/i, "$1");
+  givenNames = givenNames.replace(/^[KLC](MD\b|MOHAMMAD\b)/i, "$1");
+  givenNames = givenNames.replace(/^[KLC]\s+/i, "");
+  givenNames = givenNames.replace(/\s+[KLC]$/i, "");
+  givenNames = givenNames.replace(/<[<KLC\s]*$/g, "").replace(/\s+[KLC]{3,}$/i, "").trim();
+
+  let fullName = "";
+  if (givenNames && surname) {
+    if (country === "BGD" || givenNames.toUpperCase().startsWith("MD") || givenNames.toUpperCase().startsWith("MOHAMMAD")) {
+      fullName = `${givenNames} ${surname}`.trim();
+    } else {
+      fullName = `${givenNames} ${surname}`.trim();
+    }
+  } else {
+    fullName = givenNames || surname;
+  }
+
+  return { surname, givenNames, fullName };
+}
+
 export function parsePassportData(rawText: string) {
   // Normalize lines
   const rawLines = rawText
@@ -104,6 +210,7 @@ export function parsePassportData(rawText: string) {
   let passportNo = "";
   let surname = "";
   let givenNames = "";
+  let fullName = "";
   let nationality = "";
   let dob = "";
   let sex = "";
@@ -157,28 +264,26 @@ export function parsePassportData(rawText: string) {
       const issuingCountry = l1.substring(2, 5).replace(/</g, '').trim();
       nationality = issuingCountry;
 
-      const nameSection = l1.substring(5);
-      const nameParts = nameSection.split('<<');
-      if (nameParts.length >= 1) {
-        surname = nameParts[0].replace(/</g, ' ').trim();
-      }
-      if (nameParts.length >= 2) {
-        givenNames = nameParts[1].replace(/</g, ' ').trim();
-      }
+      const nameRes = cleanMrzLine1Name(l1, nationality);
+      surname = nameRes.surname;
+      givenNames = nameRes.givenNames;
+      fullName = nameRes.fullName;
     } else {
-      // Fallback: look for <<
-      const parts = l1.split('<<');
-      if (parts.length >= 2) {
-        surname = parts[0].replace(/[^A-Z]/g, ' ').trim();
-        givenNames = parts[1].replace(/[^A-Z]/g, ' ').trim();
-      }
+      const nameRes = cleanMrzLine1Name(l1, nationality);
+      surname = nameRes.surname;
+      givenNames = nameRes.givenNames;
+      fullName = nameRes.fullName;
     }
 
     // Line 2: Passport Number (9 chars) + Check Digit (1) + Nationality (3) + DOB (6) + Check (1) + Sex (1) + Expiry (6) + Check (1)
     if (l2.length >= 27) {
       // Document Number (pos 0 to 9)
       const docNoRaw = l2.substring(0, 9).replace(/</g, '').trim();
-      passportNo = docNoRaw.replace(/[^A-Z0-9]/g, '');
+      const cleanedDocNo = docNoRaw.replace(/[^A-Z0-9]/g, '');
+      // Valid passport numbers must be alphanumeric and typically 7-9 characters
+      if (cleanedDocNo.length >= 6) {
+        passportNo = cleanedDocNo;
+      }
 
       // Nationality (pos 10 to 13)
       const natRaw = l2.substring(10, 13).replace(/</g, '').trim();
@@ -258,6 +363,9 @@ export function parsePassportData(rawText: string) {
   const issueMatch = rawText.match(/(?:Date\s*of\s*Issue|Issue\s*Date|Issued\s*On|Date\s*d['’]émission|প্রদানের\s*তারিখ)\s*[:.]?\s*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4}|[0-9]{4}[./-][0-9]{1,2}[./-][0-9]{1,2})/i);
   if (issueMatch) {
     issueDate = issueMatch[1].trim();
+  } else if (expiry && expiry !== "N/A") {
+    // If not found in text, calculate from expiry (10 or 5 years)
+    issueDate = estimateIssueDate(expiry);
   }
 
   if (!nationality || nationality === "N/A") {
@@ -268,18 +376,29 @@ export function parsePassportData(rawText: string) {
   }
 
   // Unified direct Full Name
-  let fullName = "";
-  if (givenNames && givenNames !== "N/A" && surname && surname !== "N/A") {
-    fullName = `${givenNames} ${surname}`.trim();
-  } else if (givenNames && givenNames !== "N/A") {
-    fullName = givenNames.trim();
-  } else if (surname && surname !== "N/A") {
-    fullName = surname.trim();
-  } else {
-    const nameMatch = rawText.match(/(?:Full\s*Name|Name|Nom\s*complet|নাম)\s*[:.]?\s*([A-Z\s'-]+)/i);
-    if (nameMatch && nameMatch[1].trim().length > 1) {
-      fullName = nameMatch[1].split('\n')[0].trim();
+  if (!fullName) {
+    if (givenNames && givenNames !== "N/A" && surname && surname !== "N/A") {
+      fullName = `${givenNames} ${surname}`.trim();
+    } else if (givenNames && givenNames !== "N/A") {
+      fullName = givenNames.trim();
+    } else if (surname && surname !== "N/A") {
+      fullName = surname.trim();
+    } else {
+      const nameMatch = rawText.match(/(?:Full\s*Name|Name|Nom\s*complet|নাম)\s*[:.]?\s*([A-Z\s'-]+)/i);
+      if (nameMatch && nameMatch[1].trim().length > 1) {
+        fullName = nameMatch[1].split('\n')[0].trim();
+      }
     }
+  }
+
+  // Final sanitation for fullName: remove any stray trailing K/L/C filler noise
+  if (fullName && fullName !== "N/A") {
+    fullName = fullName
+      .replace(/<[<KLC\s]*$/g, "")
+      .replace(/\s+[KLC]{3,}$/i, "")
+      .replace(/[KLC]{5,}$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   return {
@@ -292,7 +411,7 @@ export function parsePassportData(rawText: string) {
     sex: sex || "N/A",
     issueDate: issueDate || "",
     expiry: expiry || "N/A",
-    mrzDetected,
+    mrzDetected: mrzDetected && !!passportNo && passportNo.length >= 6,
     mrzLines: extractedMrzLines,
   };
 }

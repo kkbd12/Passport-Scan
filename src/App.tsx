@@ -21,7 +21,7 @@ import {
   RotateCcw
 } from 'lucide-react';
 import { PassportRecord, ScanStatus } from './types';
-import { parsePassportData } from './utils/mrzParser';
+import { parsePassportData, cleanMrzLine1Name, estimateIssueDate } from './utils/mrzParser';
 import { exportRecordsToExcel, exportRecordsToCSV } from './utils/excelExporter';
 import { preprocessForOCR } from './utils/imagePreprocessing';
 import { CameraModal } from './components/CameraModal';
@@ -29,11 +29,48 @@ import { EditRecordModal } from './components/EditRecordModal';
 
 const STORAGE_KEY = 'passport_scanner_records_v1';
 
+export function sanitizeRecord(r: PassportRecord): PassportRecord | null {
+  // Reject pure noise entries like "P-I E" with "I EERE AEA"
+  if ((r.passportNo === "P-I E" || r.passportNo?.startsWith("P-I")) && (r.fullName?.includes("AEA") || r.fullName?.length < 4)) {
+    return null;
+  }
+
+  let fullName = r.fullName || "";
+  // Check if name contains OCR noise like KLKLCL or K KMD
+  if (fullName.includes("KLKLCL") || fullName.includes("K KMD") || fullName.includes("<<<<") || fullName.endsWith("KLKLK")) {
+    const cleaned = cleanMrzLine1Name(fullName, r.nationality || "BGD");
+    fullName = cleaned.fullName || fullName;
+  }
+  fullName = fullName
+    .replace(/<[<KLC\s]*$/g, "")
+    .replace(/\s+[KLC]{3,}$/i, "")
+    .replace(/[KLC]{5,}$/i, "")
+    .replace(/<+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  let issueDate = r.issueDate || "";
+  if ((!issueDate || issueDate === "—" || issueDate === "N/A") && r.expiry && /^\d{4}-\d{2}-\d{2}$/.test(r.expiry)) {
+    issueDate = estimateIssueDate(r.expiry);
+  }
+
+  let passportNo = (r.passportNo || "").replace(/[^A-Z0-9-]/g, "").trim();
+
+  return {
+    ...r,
+    passportNo,
+    fullName: fullName || r.fullName,
+    issueDate: issueDate || r.issueDate,
+  };
+}
+
 export default function App() {
   const [records, setRecords] = useState<PassportRecord[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      return saved ? JSON.parse(saved) : [];
+      if (!saved) return [];
+      const parsed: PassportRecord[] = JSON.parse(saved);
+      return parsed.map(sanitizeRecord).filter((r): r is PassportRecord => r !== null);
     } catch {
       return [];
     }
@@ -87,44 +124,72 @@ export default function App() {
     }, 3500);
   };
 
-  // Convert File / Blob / Data URL to base64
+  // Convert File / Blob / Data URL to base64 with optimal resolution for AI Vision
   const getBase64FromSource = async (url: string, file: File | null): Promise<{ base64: string; mimeType: string }> => {
-    // If the image was rotated or came from camera as a base64 data URL
-    if (url.startsWith('data:')) {
-      const match = url.match(/^data:([^;]+);base64,(.+)$/);
-      if (match) {
-        return { mimeType: match[1], base64: match[2] };
-      }
-      return { base64: url, mimeType: 'image/jpeg' };
-    }
-
-    if (file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const res = reader.result as string;
-          resolve({
-            base64: res,
-            mimeType: file.type || 'image/jpeg'
-          });
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    }
-
-    const response = await fetch(url);
-    const blob = await response.blob();
     return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        resolve({
-          base64: reader.result as string,
-          mimeType: blob.type || 'image/jpeg'
-        });
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        try {
+          const maxDim = 1920;
+          let width = img.naturalWidth || img.width;
+          let height = img.naturalHeight || img.height;
+
+          if (width > maxDim || height > maxDim) {
+            if (width > height) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            } else {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, width, height);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+            const cleanBase64 = dataUrl.split(',')[1];
+            resolve({ base64: cleanBase64, mimeType: 'image/jpeg' });
+            return;
+          }
+          
+          // Fallback if canvas context fails
+          if (url.startsWith('data:')) {
+            const match = url.match(/^data:([^;]+);base64,(.+)$/);
+            if (match) {
+              resolve({ mimeType: match[1], base64: match[2] });
+              return;
+            }
+          }
+          resolve({ base64: url, mimeType: 'image/jpeg' });
+        } catch (e) {
+          reject(e);
+        }
       };
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
+      img.onerror = () => {
+        // Direct read fallback
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const res = reader.result as string;
+            const match = res.match(/^data:([^;]+);base64,(.+)$/);
+            resolve({
+              base64: match ? match[2] : res,
+              mimeType: file.type || 'image/jpeg'
+            });
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        } else {
+          resolve({ base64: url, mimeType: 'image/jpeg' });
+        }
+      };
+
+      img.src = url;
     });
   };
 
@@ -368,23 +433,52 @@ export default function App() {
       }
 
       // Step D: Create and add the valid record to Scanned Records!
-      const cleanPassportNo = (parsedData.passportNo || "").trim();
-      const cleanFullName = (parsedData.fullName || "").trim();
-      const cleanNationality = (parsedData.nationality || "").trim();
+      let cleanPassportNo = (parsedData.passportNo || "").replace(/[^A-Z0-9]/gi, "").trim();
+      let cleanFullName = (parsedData.fullName || "").trim();
+
+      // Clean any MRZ filler OCR artifacts in name
+      if (cleanFullName.includes("KLKLCL") || cleanFullName.includes("K KMD") || cleanFullName.includes("<<<<") || cleanFullName.endsWith("KLKLK")) {
+        const cleaned = cleanMrzLine1Name(cleanFullName, parsedData.nationality || "BGD");
+        cleanFullName = cleaned.fullName || cleanFullName;
+      }
+      cleanFullName = cleanFullName
+        .replace(/<[<KLC\s]*$/g, "")
+        .replace(/\s+[KLC]{3,}$/i, "")
+        .replace(/[KLC]{5,}$/i, "")
+        .replace(/<+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      // Reject garbage scans (e.g. noise like "P-I E" with "I EERE AEA")
+      if ((!cleanPassportNo || cleanPassportNo.length < 6) && (!cleanFullName || cleanFullName.length < 6 || !cleanFullName.includes(" "))) {
+        setStatus({
+          state: 'error',
+          message: 'ছবি থেকে পাসপোর্টের স্পষ্ট তথ্য পাওয়া যায়নি। অনুগ্রহ করে রোটেট (Rotate) করে সোজা করুন অথবা পরিষ্কার ছবি তুলুন।',
+          progress: 0,
+        });
+        showToast('পাসপোর্ট স্পষ্ট নয়। অনুগ্রহ করে পরিষ্কার ও সোজা ছবি দিন।', 'error');
+        return;
+      }
+
+      const cleanNationality = (parsedData.nationality || "BGD").replace(/[^A-Z]/g, "").trim() || "BGD";
       const cleanDob = (parsedData.dob || "").trim();
-      const cleanIssueDate = (parsedData.issueDate || "").trim();
+      let cleanIssueDate = (parsedData.issueDate || "").trim();
       const cleanExpiry = (parsedData.expiry || "").trim();
+
+      if ((!cleanIssueDate || cleanIssueDate === "—" || cleanIssueDate === "N/A") && cleanExpiry && /^\d{4}-\d{2}-\d{2}$/.test(cleanExpiry)) {
+        cleanIssueDate = estimateIssueDate(cleanExpiry);
+      }
 
       const newRecord: PassportRecord = {
         id: `pass_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        passportNo: cleanPassportNo || (cleanFullName ? `P-${cleanFullName.substring(0, 3)}` : `DOC-${Date.now().toString().slice(-6)}`),
-        fullName: cleanFullName,
+        passportNo: cleanPassportNo || `DOC-${Date.now().toString().slice(-6)}`,
+        fullName: cleanFullName || "N/A",
         nationality: cleanNationality,
-        dob: cleanDob,
+        dob: cleanDob || "N/A",
         sex: parsedData.sex || "Unspecified",
-        issueDate: cleanIssueDate,
-        expiry: cleanExpiry,
-        mrzDetected: !!parsedData.mrzDetected,
+        issueDate: cleanIssueDate || "—",
+        expiry: cleanExpiry || "N/A",
+        mrzDetected: !!parsedData.mrzDetected && !!cleanPassportNo,
         mrzLines: parsedData.mrzLines || [],
         rawText: rawDetectedText || "",
         confidence: parsedData.confidence || 90,

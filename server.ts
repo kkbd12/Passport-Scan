@@ -92,12 +92,12 @@ Analyze both:
 
 Rules:
 - passportNo: Extract the document number exactly as printed or encoded in MRZ (e.g., EA0123456, A12302331, C12345678, 550982341, A1234567, etc.). Do not include spaces.
-- fullName: Direct complete Full Name of the holder in uppercase (e.g. "MOHAMMAD TARIQ RAHMAN", "JOHN PAUL STEVENS", "MD MAMUNUR RASHID"). Do not split into surname and given names, provide the unified direct full name.
+- fullName: Direct complete Full Name of the holder in uppercase as printed in the Visual Inspection Zone (e.g. "MD MAHAFIZUR RAHMAN", "MOHAMMAD TARIQ RAHMAN", "JOHN PAUL STEVENS"). NEVER include MRZ filler characters like '<', 'K', 'L' or repeat noise. For Bangladesh passports, the name is typically printed as 'Given Name: MD MAHAFIZUR', 'Surname: RAHMAN', and the Full Name should be 'MD MAHAFIZUR RAHMAN'.
 - nationality: 3-letter ICAO country code (e.g., BGD, USA, GBR, CAN, IND, PAK, AUS, SAU, ARE, DEU).
 - dob: Date of Birth formatted as YYYY-MM-DD.
 - sex: "Male" or "Female" or "Unspecified".
-- issueDate: Date of Issue / প্রদানের তারিখ formatted as YYYY-MM-DD (e.g. "2022-05-15"). If not visible on document, return empty string "".
-- expiry: Date of Expiration / মেয়াদোত্তীর্ণের তারিখ formatted as YYYY-MM-DD (e.g. "2032-05-14").
+- issueDate: Date of Issue / প্রদানের তারিখ formatted as YYYY-MM-DD (e.g. "2023-10-22"). Look closely at the bio-data page for "Date of Issue" or "প্রদানের তারিখ". If not explicitly printed or visible, calculate it from expiry date (e.g. Bangladesh passports are 10-year or 5-year validity; if expiry is 2033-10-21, issueDate is 2023-10-22).
+- expiry: Date of Expiration / মেয়াদোত্তীর্ণের তারিখ formatted as YYYY-MM-DD (e.g. "2033-10-21").
 - mrzDetected: boolean, true if the 2-line or 3-line MRZ was visible and decoded.
 - mrzLines: Array of the exact MRZ strings (e.g. ["P<BGD...", "EA01234..."]).
 - confidence: Integer confidence between 70 and 100.
@@ -120,10 +120,14 @@ Return STRICTLY valid JSON matching:
   "confidence": 98
 }`;
 
-      const candidateModels = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
+      const candidateModels = [
+        "gemini-3.1-flash-lite",
+        "gemini-3.8-flash",
+        "gemini-flash-latest"
+      ];
       let lastErr: any = null;
       let responseText = "";
-      let usedModel = "gemini-3.8-flash";
+      let usedModel = "gemini-3.1-flash-lite";
 
       for (const modelName of candidateModels) {
         try {
@@ -155,8 +159,14 @@ Return STRICTLY valid JSON matching:
             break;
           }
         } catch (modelErr: any) {
-          console.warn(`Model ${modelName} failed, trying next fallback:`, modelErr?.message || modelErr);
+          const errCode = modelErr?.status || modelErr?.statusCode || modelErr?.error?.code;
+          const errMsg = modelErr?.message || String(modelErr);
+          console.info(`Model ${modelName} returned status ${errCode || 'error'}: trying next fallback model.`);
           lastErr = modelErr;
+          // Short delay before trying next model if 503 or 429
+          if (errCode === 503 || errCode === 429) {
+            await new Promise(r => setTimeout(r, 400));
+          }
         }
       }
 
@@ -164,12 +174,43 @@ Return STRICTLY valid JSON matching:
         throw lastErr;
       }
 
-      let parsedData;
+      let parsedData: any;
       try {
         parsedData = JSON.parse(responseText);
       } catch (parseErr) {
         const cleaned = responseText.replace(/```json/g, "").replace(/```/g, "").trim();
         parsedData = JSON.parse(cleaned);
+      }
+
+      // Post-process to ensure pristine clean data
+      if (parsedData) {
+        if (parsedData.fullName) {
+          parsedData.fullName = parsedData.fullName
+            .replace(/<[<KLC\s]*$/g, "")
+            .replace(/\s+[KLC]{3,}$/i, "")
+            .replace(/[KLC]{5,}$/i, "")
+            .replace(/<+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        }
+        if (parsedData.passportNo) {
+          parsedData.passportNo = parsedData.passportNo.replace(/[^A-Z0-9]/g, "").trim();
+        }
+        // If issueDate is missing but expiry is known
+        if ((!parsedData.issueDate || parsedData.issueDate === "—" || parsedData.issueDate === "N/A") && parsedData.expiry && /^\d{4}-\d{2}-\d{2}$/.test(parsedData.expiry)) {
+          const parts = parsedData.expiry.split("-");
+          const expYear = parseInt(parts[0], 10);
+          const month = parseInt(parts[1], 10);
+          const day = parseInt(parts[2], 10);
+          const validityYears = (expYear - new Date().getFullYear() > 4) ? 10 : 5;
+          const expDateObj = new Date(expYear, month - 1, day);
+          expDateObj.setFullYear(expDateObj.getFullYear() - validityYears);
+          expDateObj.setDate(expDateObj.getDate() + 1);
+          const y = expDateObj.getFullYear();
+          const m = String(expDateObj.getMonth() + 1).padStart(2, "0");
+          const d = String(expDateObj.getDate()).padStart(2, "0");
+          parsedData.issueDate = `${y}-${m}-${d}`;
+        }
       }
 
       return res.json({
@@ -179,10 +220,12 @@ Return STRICTLY valid JSON matching:
       });
 
     } catch (err: any) {
-      console.error("Passport AI scanning error:", err);
-      return res.status(500).json({ 
+      console.warn("Passport AI scanning unavailable, using OCR fallback:", err?.message || err);
+      return res.status(200).json({ 
+        success: false,
         error: err.message || "Failed to process passport image with AI",
-        engine: "gemini-fallback"
+        fallbackToOcr: true,
+        engine: "local-ocr-fallback"
       });
     }
   });
