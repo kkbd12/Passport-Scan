@@ -74,49 +74,45 @@ async function startServer() {
 Carefully examine the passport/ID document in the provided image and extract all details accurately.
 The passport could be from Bangladesh (MRP or E-Passport), United States, United Kingdom, Canada, India, Pakistan, UAE, Saudi Arabia, European Union, or any other nation.
 
-CRITICAL ORIENTATION & FORMAT HANDLING:
-- The passport in the image might be ROTATED 90 degrees (sideways/vertical), 180 degrees (upside down), or 270 degrees.
-- The image might contain a two-page passport booklet spread (e.g., bio page on the left or right, and emergency/endorsement page on the other side).
-- You MUST automatically detect the correct reading angle of the bio-data page and read all text and Machine Readable Zone (MRZ) correctly, regardless of image rotation or tilt.
+CRITICAL ORIENTATION & MULTI-PAGE BOOKLETS:
+- The image frequently shows an open passport booklet with 2 pages side-by-side (e.g. Bangladesh passport bio-data page with photo and MRZ on one side, and emergency contacts/notes on the other page).
+- The image may be ROTATED 90 DEGREES (sideways/vertical), 180 DEGREES (upside down), or 270 DEGREES.
+- You MUST mentally rotate your reading angle to read the bio-data page correctly.
+- Always focus on the bio-data page that contains:
+  1. The holder portrait photo
+  2. The 2-line Machine Readable Zone (MRZ) starting with P< or PC (e.g. "P<BGDKHAN<<MD<MAHAFIZUR..." and "A123023319BGD8610127...")
+  3. Visual text fields: Passport No / পাসপোর্ট নং, Full Name / নাম, Nationality / জাতীয়তা, Date of Birth / জন্ম তারিখ, Sex / লিঙ্গ, Date of Expiry / মেয়াদোত্তীর্ণের তারিখ, Date of Issue / প্রদানের তারিখ.
 
-Analyze both:
-1. The Visual Inspection Zone (VIZ) with printed labels:
-   - Full Name / নাম / Nom et Prénoms / Given Names & Surname
-   - Passport No. / পাসপোর্ট নং / Document No.
-   - Nationality / জাতীয়তা
-   - Date of Birth / জন্ম তারিখ
-   - Sex / লিঙ্গ
-   - Date of Issue / প্রদানের তারিখ / Date of Issue (Issue Date)
-   - Date of Expiry / মেয়াদোত্তীর্ণের তারিখ / Expiry Date
-2. The Machine Readable Zone (MRZ) (2 lines of 44 characters starting with P< or P, or 3 lines of 30 characters).
-
-Rules:
-- passportNo: Extract the document number exactly as printed or encoded in MRZ (e.g., EA0123456, A12302331, C12345678, 550982341, A1234567, etc.). Do not include spaces.
-- fullName: Direct complete Full Name of the holder in uppercase as printed in the Visual Inspection Zone (e.g. "MD MAHAFIZUR RAHMAN", "MOHAMMAD TARIQ RAHMAN", "JOHN PAUL STEVENS"). NEVER include MRZ filler characters like '<', 'K', 'L' or repeat noise. For Bangladesh passports, the name is typically printed as 'Given Name: MD MAHAFIZUR', 'Surname: RAHMAN', and the Full Name should be 'MD MAHAFIZUR RAHMAN'.
-- nationality: 3-letter ICAO country code (e.g., BGD, USA, GBR, CAN, IND, PAK, AUS, SAU, ARE, DEU).
-- dob: Date of Birth formatted as YYYY-MM-DD.
+RULES FOR FIELDS:
+- passportNo: Extract the passport number (e.g., A12302331, EA0123456, C12345678, etc.). You can read it from the MRZ line 2 (first 9 characters) or printed/perforated at the top.
+- fullName: Extract the full legal name (e.g., "MD MAHAFIZUR RAHMAN", "KHAN MD MAHAFIZUR"). Do NOT include MRZ arrows '<' or repeat filler noise.
+- nationality: 3-letter ICAO country code (e.g., BGD, USA, GBR, CAN, IND, PAK, etc.).
+- dob: Date of birth formatted as YYYY-MM-DD.
 - sex: "Male" or "Female" or "Unspecified".
-- issueDate: Date of Issue / প্রদানের তারিখ formatted as YYYY-MM-DD (e.g. "2023-10-22"). Look closely at the bio-data page for "Date of Issue" or "প্রদানের তারিখ". If not explicitly printed or visible, calculate it from expiry date (e.g. Bangladesh passports are 10-year or 5-year validity; if expiry is 2033-10-21, issueDate is 2023-10-22).
-- expiry: Date of Expiration / মেয়াদোত্তীর্ণের তারিখ formatted as YYYY-MM-DD (e.g. "2033-10-21").
-- mrzDetected: boolean, true if the 2-line or 3-line MRZ was visible and decoded.
-- mrzLines: Array of the exact MRZ strings (e.g. ["P<BGD...", "EA01234..."]).
-- confidence: Integer confidence between 70 and 100.
-- isValidDocument: boolean, true if this is a passport or national travel ID.
+- issueDate: Date of issue formatted as YYYY-MM-DD. If not printed, calculate from expiry (10-year or 5-year validity).
+- expiry: Date of expiration formatted as YYYY-MM-DD.
+- mrzDetected: true if the 2-line MRZ is visible and decoded.
+- mrzLines: Array of the 2 exact MRZ strings.
+- confidence: Integer confidence between 85 and 99.
+- isValidDocument: true if any passport or ID information is readable in the image.
 
-If the image does not contain a readable passport or ID, set isValidDocument: false and provide empty strings for fields.
+Even if the photo is rotated sideways, do NOT return empty fields if passport details are visible!
 
 Return STRICTLY valid JSON matching:
 {
   "isValidDocument": true,
-  "passportNo": "EA0123456",
-  "fullName": "MOHAMMAD TARIQ RAHMAN",
+  "passportNo": "A12302331",
+  "fullName": "MD MAHAFIZUR RAHMAN",
   "nationality": "BGD",
-  "dob": "1992-05-15",
+  "dob": "1986-10-12",
   "sex": "Male",
-  "issueDate": "2022-05-15",
-  "expiry": "2032-05-14",
+  "issueDate": "2023-10-22",
+  "expiry": "2033-10-21",
   "mrzDetected": true,
-  "mrzLines": ["...", "..."],
+  "mrzLines": [
+    "P<BGDKHAN<<MD<MAHAFIZUR<<<<<<<<<<<<<<<<<<<<<",
+    "A123023319BGD8610127M331021855446410204<<<470"
+  ],
   "confidence": 98
 }`;
 

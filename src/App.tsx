@@ -29,8 +29,20 @@ import { ConfidenceIndicator } from './components/ConfidenceIndicator';
 const STORAGE_KEY = 'passport_scanner_records_v1';
 
 export function sanitizeRecord(r: PassportRecord): PassportRecord | null {
-  // Reject pure noise entries like "P-I E" with "I EERE AEA"
-  if ((r.passportNo === "P-I E" || r.passportNo?.startsWith("P-I")) && (r.fullName?.includes("AEA") || r.fullName?.length < 4)) {
+  if (!r) return null;
+
+  // Filter out pure noise, corrupted entries, and erroneous scans like "DOC-342349" / "I EERE AEA"
+  const isErrorRow = 
+    r.fullName?.includes("I EERE AEA") ||
+    r.fullName === "I EERE AEA" ||
+    (r.passportNo?.startsWith("DOC-") && (!r.dob || r.dob === "N/A" || !r.expiry || r.expiry === "N/A")) ||
+    (r.passportNo?.startsWith("DOC-") && r.confidence !== undefined && r.confidence < 60) ||
+    r.passportNo === "P-I E" ||
+    r.passportNo?.startsWith("P-I ") ||
+    (r.confidence !== undefined && r.confidence < 45 && !r.mrzDetected) ||
+    (!r.passportNo && !r.fullName);
+
+  if (isErrorRow) {
     return null;
   }
 
@@ -69,7 +81,10 @@ export default function App() {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (!saved) return [];
       const parsed: PassportRecord[] = JSON.parse(saved);
-      return parsed.map(sanitizeRecord).filter((r): r is PassportRecord => r !== null);
+      const cleaned = parsed.map(sanitizeRecord).filter((r): r is PassportRecord => r !== null);
+      // Immediately write back sanitized list so error records are permanently purged from localStorage
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
+      return cleaned;
     } catch {
       return [];
     }
@@ -192,6 +207,40 @@ export default function App() {
     });
   };
 
+  // Helper to rotate image in client canvas for multi-orientation detection
+  const getRotatedBase64 = async (sourceUrl: string, degrees: number): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          if (Math.abs(degrees) === 90 || Math.abs(degrees) === 270) {
+            canvas.width = img.naturalHeight || img.height;
+            canvas.height = img.naturalWidth || img.width;
+          } else {
+            canvas.width = img.naturalWidth || img.width;
+            canvas.height = img.naturalHeight || img.height;
+          }
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error("Canvas context failed"));
+            return;
+          }
+          ctx.translate(canvas.width / 2, canvas.height / 2);
+          ctx.rotate((degrees * Math.PI) / 180);
+          ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+          resolve(dataUrl.split(',')[1]);
+        } catch (e) {
+          reject(e);
+        }
+      };
+      img.onerror = reject;
+      img.src = sourceUrl;
+    });
+  };
+
   // Image file handler
   const handleFileSelect = (file: File) => {
     if (!file.type.startsWith('image/')) {
@@ -264,35 +313,77 @@ export default function App() {
       let parsedData: any = null;
       let rawDetectedText = "";
 
-      // Step A: Attempt Server-side AI Scan via /api/scan-passport
+      // Step A: Attempt Server-side AI Scan via /api/scan-passport (with auto-orientation)
       try {
         const { base64, mimeType } = await getBase64FromSource(previewUrl, selectedFile);
         
         setStatus({
           state: 'scanning',
           message: 'Extracting ICAO MRZ and bio data with Vision AI...',
-          progress: 55,
+          progress: 50,
         });
 
-        const apiRes = await fetch('/api/scan-passport', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imageBase64: base64, mimeType })
-        });
-
-        if (apiRes.ok) {
+        const executeAiScan = async (b64Data: string) => {
+          const apiRes = await fetch('/api/scan-passport', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ imageBase64: b64Data, mimeType: 'image/jpeg' })
+          });
+          if (!apiRes.ok) return null;
           const resJson = await apiRes.json();
           if (resJson?.success && resJson?.data) {
             const d = resJson.data;
             const extractedName = d.fullName || (d.givenNames && d.surname ? `${d.givenNames} ${d.surname}` : d.givenNames || d.surname || "");
-            const hasValidInfo = !!(d.passportNo || extractedName || (d.mrzLines && d.mrzLines.length > 0));
+            const hasValidInfo = !!(d.passportNo || (extractedName && extractedName.length > 5) || (d.mrzLines && d.mrzLines.length > 0));
             if (hasValidInfo) {
-              parsedData = {
+              return {
                 ...d,
                 fullName: extractedName,
                 issueDate: d.issueDate || ""
               };
             }
+          }
+          return null;
+        };
+
+        // Attempt 1: As-is orientation
+        parsedData = await executeAiScan(base64);
+
+        // Attempt 2: If not detected on original angle, try 90° clockwise rotation
+        if (!parsedData || (!parsedData.passportNo && !parsedData.fullName)) {
+          setStatus({
+            state: 'scanning',
+            message: 'Auto-orienting document (testing 90° rotation)...',
+            progress: 60,
+          });
+          try {
+            const rot90Base64 = await getRotatedBase64(previewUrl, 90);
+            const rotData = await executeAiScan(rot90Base64);
+            if (rotData && (rotData.passportNo || rotData.fullName)) {
+              parsedData = rotData;
+              setPreviewUrl(`data:image/jpeg;base64,${rot90Base64}`);
+            }
+          } catch (rotErr) {
+            console.warn("90deg rotation scan attempt:", rotErr);
+          }
+        }
+
+        // Attempt 3: If still not detected, try 270° rotation
+        if (!parsedData || (!parsedData.passportNo && !parsedData.fullName)) {
+          setStatus({
+            state: 'scanning',
+            message: 'Testing alternate angle (270° rotation)...',
+            progress: 65,
+          });
+          try {
+            const rot270Base64 = await getRotatedBase64(previewUrl, 270);
+            const rotData = await executeAiScan(rot270Base64);
+            if (rotData && (rotData.passportNo || rotData.fullName)) {
+              parsedData = rotData;
+              setPreviewUrl(`data:image/jpeg;base64,${rot270Base64}`);
+            }
+          } catch (rotErr) {
+            console.warn("270deg rotation scan attempt:", rotErr);
           }
         }
       } catch (apiErr) {
@@ -400,14 +491,32 @@ export default function App() {
         .replace(/\s+/g, " ")
         .trim();
 
-      // Reject garbage scans (e.g. noise like "P-I E" with "I EERE AEA")
-      if ((!cleanPassportNo || cleanPassportNo.length < 6) && (!cleanFullName || cleanFullName.length < 6 || !cleanFullName.includes(" "))) {
+      // Check if passport number can be inferred from MRZ line 2 if not extracted directly
+      if (!cleanPassportNo && parsedData.mrzLines && parsedData.mrzLines.length >= 2) {
+        const line2 = (parsedData.mrzLines[1] || "").replace(/[^A-Z0-9<]/g, "");
+        const docMatch = line2.slice(0, 9).replace(/</g, "");
+        if (docMatch && docMatch.length >= 7) {
+          cleanPassportNo = docMatch;
+        }
+      }
+
+      // Strictly reject garbage / fake / corrupted scans (e.g. noise like "I EERE AEA" or missing passport numbers)
+      const isGarbage = 
+        cleanFullName.includes("I EERE AEA") ||
+        cleanFullName === "I EERE AEA" ||
+        cleanPassportNo.startsWith("DOC-") ||
+        (!cleanPassportNo && cleanFullName.length < 6) ||
+        (cleanPassportNo.length < 5 && cleanFullName.length < 6) ||
+        (!cleanPassportNo && parsedData.dob === "N/A" && parsedData.expiry === "N/A") ||
+        (parsedData.confidence && parsedData.confidence < 45);
+
+      if (isGarbage || !cleanPassportNo) {
         setStatus({
           state: 'error',
-          message: 'ছবি থেকে পাসপোর্টের স্পষ্ট তথ্য পাওয়া যায়নি। অনুগ্রহ করে রোটেট (Rotate) করে সোজা করুন অথবা পরিষ্কার ছবি তুলুন।',
+          message: 'ছবি থেকে পাসপোর্টের স্পষ্ট তথ্য পাওয়া যায়নি। অনুগ্রহ করে পরিষ্কার ও সোজা পাসপোর্ট পাতার ছবি আপলোড করুন।',
           progress: 0,
         });
-        showToast('পাসপোর্ট স্পষ্ট নয়। অনুগ্রহ করে পরিষ্কার ও সোজা ছবি দিন।', 'error');
+        showToast('পাসপোর্ট তথ্য স্পষ্ট নয়। অনুগ্রহ করে পরিষ্কার ছবি দিন।', 'error');
         return;
       }
 
@@ -422,7 +531,7 @@ export default function App() {
 
       const newRecord: PassportRecord = {
         id: `pass_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        passportNo: cleanPassportNo || `DOC-${Date.now().toString().slice(-6)}`,
+        passportNo: cleanPassportNo,
         fullName: cleanFullName || "N/A",
         nationality: cleanNationality,
         dob: cleanDob || "N/A",
